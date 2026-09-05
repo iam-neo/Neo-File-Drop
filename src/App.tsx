@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { getAppsScriptUrl } from './services/api';
 import { useFileQueue } from './hooks/useFileQueue';
 import { useUploadManager } from './hooks/useUploadManager';
@@ -18,6 +18,10 @@ import { SettingsModal } from './components/SettingsModal/SettingsModal';
 export default function App() {
   const [isConfigured, setIsConfigured] = useState(() => !!getAppsScriptUrl());
   const [showSettings, setShowSettings] = useState(false);
+
+  useEffect(() => {
+    setIsConfigured(!!getAppsScriptUrl());
+  }, []);
 
   const { files, addFiles, removeFile, clearQueue, updateFile, stats } = useFileQueue();
 
