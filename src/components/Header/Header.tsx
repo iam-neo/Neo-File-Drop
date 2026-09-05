@@ -1,14 +1,13 @@
 import React from 'react';
-import { Settings, HardDrive } from 'lucide-react';
+import { HardDrive } from 'lucide-react';
 
 interface HeaderProps {
-  onOpenSettings: () => void;
+  onOpenSettings?: () => void;
   isConfigured: boolean;
   isOffline: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
-  onOpenSettings,
   isConfigured,
   isOffline
 }) => {
@@ -56,29 +55,12 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Right: Actions */}
         <div className="flex items-center gap-2">
-          {isConfigured ? (
+          {isConfigured && (
             <div className="inline-flex items-center gap-1.5 text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200/80 px-2.5 py-1 rounded-lg">
               <span className="w-2 h-2 rounded-full bg-emerald-500" />
               <span>Drive Ready</span>
             </div>
-          ) : (
-            <button
-              onClick={onOpenSettings}
-              className="text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 animate-pulse"
-            >
-              <Settings className="w-3.5 h-3.5 text-amber-600" />
-              <span>Connect Drive</span>
-            </button>
           )}
-
-          <button
-            onClick={onOpenSettings}
-            className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition-colors"
-            title="Configure Apps Script Web App URL"
-            aria-label="Settings"
-          >
-            <Settings className="w-5 h-5" />
-          </button>
         </div>
       </div>
     </header>
