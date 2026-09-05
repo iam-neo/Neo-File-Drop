@@ -133,7 +133,7 @@ function handleInitResumableUpload(body) {
     return createErrorResponse(fileValidation.error, 'VALIDATION_ERROR');
   }
   
-  var result = initResumableUpload(body.folderId, body.fileName, body.fileSize, body.mimeType);
+  var result = initResumableUpload(body.folderId, body.fileName, body.fileSize, body.mimeType, body.clientOrigin);
   
   return createJsonResponse(result);
 }

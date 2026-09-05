@@ -1,5 +1,5 @@
 import React from 'react';
-import { ExternalLink, CheckCircle2, FolderCheck, Plus } from 'lucide-react';
+import { CheckCircle2, Plus } from 'lucide-react';
 import { FileQueueItem, UploadSessionState } from '../../types/upload';
 import { formatBytes } from '../../utils/formatBytes';
 
@@ -39,7 +39,7 @@ export const SuccessState: React.FC<SuccessStateProps> = ({
         Upload Complete!
       </h2>
       <p className="text-sm text-slate-500 mt-1 max-w-md mx-auto">
-        All {completedFiles.length} {completedFiles.length === 1 ? 'file has' : 'files have'} been uploaded and safely organized in your Google Drive.
+        All {completedFiles.length} {completedFiles.length === 1 ? 'file has' : 'files have'} been uploaded and safely delivered.
       </p>
 
       {/* Session Details Card */}
@@ -60,25 +60,12 @@ export const SuccessState: React.FC<SuccessStateProps> = ({
         </div>
       </div>
 
-      {/* Primary Action: Open Google Drive Folder */}
-      <div className="mt-6 flex flex-col sm:flex-row items-center justify-center gap-3 max-w-md mx-auto">
-        {session.driveFolderUrl && (
-          <a
-            href={session.driveFolderUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm px-6 py-3.5 rounded-xl shadow-md transition-all hover:scale-[1.02] active:scale-95"
-          >
-            <FolderCheck className="w-4 h-4" />
-            <span>Open in Google Drive</span>
-            <ExternalLink className="w-4 h-4" />
-          </a>
-        )}
-
+      {/* Action: Upload More Files */}
+      <div className="mt-6 flex items-center justify-center max-w-xs mx-auto">
         <button
           type="button"
           onClick={onUploadMore}
-          className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-sm px-5 py-3.5 rounded-xl transition-all"
+          className="w-full inline-flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm px-6 py-3.5 rounded-xl shadow-md transition-all hover:scale-[1.02] active:scale-95"
         >
           <Plus className="w-4 h-4" />
           <span>Upload More Files</span>

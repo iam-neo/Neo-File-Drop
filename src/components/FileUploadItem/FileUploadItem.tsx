@@ -10,7 +10,6 @@ import {
   CheckCircle2,
   RotateCcw,
   X,
-  ExternalLink,
   Loader2,
   Pause
 } from 'lucide-react';
@@ -132,17 +131,6 @@ export const FileUploadItem: React.FC<FileUploadItemProps> = ({
 
         {/* Right: Actions */}
         <div className="flex items-center gap-1 shrink-0">
-          {item.status === 'completed' && item.driveFileUrl && (
-            <a
-              href={item.driveFileUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-              title="View on Google Drive"
-            >
-              <ExternalLink className="w-4 h-4" />
-            </a>
-          )}
 
           {item.status === 'error' && (
             <button

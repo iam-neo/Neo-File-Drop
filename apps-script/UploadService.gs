@@ -15,7 +15,7 @@
  * @param {string} mimeType - MIME type of the file
  * @returns {{success: boolean, resumableUri?: string, error?: string}}
  */
-function initResumableUpload(folderId, fileName, fileSize, mimeType) {
+function initResumableUpload(folderId, fileName, fileSize, mimeType, clientOrigin) {
   try {
     var token = ScriptApp.getOAuthToken();
     
@@ -30,14 +30,22 @@ function initResumableUpload(folderId, fileName, fileSize, mimeType) {
     // POST to /upload/drive/v3/files?uploadType=resumable
     var initUrl = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable';
     
+    var headers = {
+      'Authorization': 'Bearer ' + token,
+      'X-Upload-Content-Type': mimeType,
+      'X-Upload-Content-Length': String(fileSize)
+    };
+
+    // CRITICAL: Pass the browser origin so Google Drive API enables CORS
+    // allowing browser-direct binary PUT transfers at full network speed!
+    if (clientOrigin && typeof clientOrigin === 'string') {
+      headers['Origin'] = clientOrigin;
+    }
+    
     var response = UrlFetchApp.fetch(initUrl, {
       method: 'post',
       contentType: 'application/json; charset=UTF-8',
-      headers: {
-        'Authorization': 'Bearer ' + token,
-        'X-Upload-Content-Type': mimeType,
-        'X-Upload-Content-Length': String(fileSize)
-      },
+      headers: headers,
       payload: JSON.stringify(metadata),
       muteHttpExceptions: true
     });
@@ -111,7 +119,7 @@ function relayUploadChunk(resumableUri, rangeStart, rangeEnd, totalBytes, chunkB
       headers: {
         'Content-Range': contentRange
       },
-      payload: chunkBlob.getBytes(),
+      payload: chunkBlob,
       muteHttpExceptions: true
     });
     

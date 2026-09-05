@@ -77,6 +77,7 @@ export interface InitResumableUploadRequest {
   fileName: string;
   fileSize: number;
   mimeType: string;
+  clientOrigin?: string;
 }
 
 export interface InitResumableUploadResponse extends ApiBaseResponse {

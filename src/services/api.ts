@@ -117,7 +117,8 @@ export const apiService = {
       folderId,
       fileName,
       fileSize,
-      mimeType
+      mimeType,
+      clientOrigin: typeof window !== 'undefined' ? window.location.origin : ''
     };
     return callAppsScript<InitResumableUploadResponse>(request, signal);
   },

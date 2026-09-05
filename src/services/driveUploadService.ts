@@ -95,6 +95,84 @@ export async function queryCurrentOffset(
 }
 
 /**
+ * Performs a direct binary PUT chunk upload using XMLHttpRequest
+ * Allows real-time progress events via xhr.upload.onprogress
+ */
+function putChunkDirectXHR(
+  resumableUri: string,
+  chunk: Blob,
+  contentRange: string,
+  onChunkProgress?: (loadedInChunk: number) => void,
+  signal?: AbortSignal
+): Promise<{ status: number; rangeHeader: string | null; responseText: string }> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Upload cancelled by user', 'AbortError'));
+      return;
+    }
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', resumableUri, true);
+    xhr.setRequestHeader('Content-Range', contentRange);
+
+    const abortHandler = () => {
+      xhr.abort();
+      reject(new DOMException('Upload cancelled by user', 'AbortError'));
+    };
+
+    if (signal) {
+      signal.addEventListener('abort', abortHandler, { once: true });
+    }
+
+    if (xhr.upload && onChunkProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          onChunkProgress(e.loaded);
+        }
+      };
+    }
+
+    xhr.onload = () => {
+      if (signal) {
+        signal.removeEventListener('abort', abortHandler);
+      }
+      resolve({
+        status: xhr.status,
+        rangeHeader: xhr.getResponseHeader('Range') || xhr.getResponseHeader('range'),
+        responseText: xhr.responseText
+      });
+    };
+
+    xhr.onerror = () => {
+      if (signal) {
+        signal.removeEventListener('abort', abortHandler);
+      }
+      reject(new TypeError('Direct PUT network or CORS error'));
+    };
+
+    xhr.onabort = () => {
+      if (signal) {
+        signal.removeEventListener('abort', abortHandler);
+      }
+      reject(new DOMException('Upload cancelled by user', 'AbortError'));
+    };
+
+    xhr.send(chunk);
+  });
+}
+
+/**
+ * Gets optimal chunk size for a given file size (strictly multiple of 256 KiB)
+ * Uses 10 MiB for large files to reduce round-trips, and 5 MiB for smaller files
+ */
+function getChunkSize(fileSize: number): number {
+  if (fileSize >= 30 * 1024 * 1024) {
+    return 10 * 1024 * 1024; // 10 MiB (40 * 256 KiB)
+  }
+  return 5 * 1024 * 1024; // 5 MiB (20 * 256 KiB)
+}
+
+/**
  * Uploads a file using chunked resumable uploading
  */
 export async function uploadFileChunks(
@@ -106,13 +184,43 @@ export async function uploadFileChunks(
   startOffset: number = 0
 ): Promise<UploadResult> {
   const totalBytes = file.size;
+  const chunkSize = getChunkSize(totalBytes);
   let currentOffset = startOffset;
-  let useDirectUpload = true; // start with direct upload, fallback to relay if CORS fails
+  let useDirectUpload = true; // Primary high-speed direct path
 
-  // Speed measurement tracking
+  // Rolling speed measurement
   let lastTime = performance.now();
   let lastUploadedBytes = currentOffset;
   let rollingSpeed = 0;
+
+  const emitProgress = (inFlightUploaded: number) => {
+    const now = performance.now();
+    const timeDeltaSec = (now - lastTime) / 1000;
+    if (timeDeltaSec >= 0.25) {
+      const bytesDelta = inFlightUploaded - lastUploadedBytes;
+      const currentSpeed = Math.max(0, bytesDelta / timeDeltaSec);
+      rollingSpeed = rollingSpeed === 0 ? currentSpeed : rollingSpeed * 0.7 + currentSpeed * 0.3;
+      lastTime = now;
+      lastUploadedBytes = inFlightUploaded;
+    }
+
+    const remainingBytes = Math.max(0, totalBytes - inFlightUploaded);
+    const estimatedSecondsRemaining =
+      rollingSpeed > 0 ? Math.ceil(remainingBytes / rollingSpeed) : null;
+    const progressPercent = Math.min(
+      99.9,
+      Math.round((inFlightUploaded / totalBytes) * 1000) / 10
+    );
+
+    onProgress({
+      fileId,
+      uploadedBytes: inFlightUploaded,
+      totalBytes,
+      progressPercent,
+      bytesPerSecond: rollingSpeed,
+      estimatedSecondsRemaining
+    });
+  };
 
   // Handle empty 0-byte file edge case
   if (totalBytes === 0) {
@@ -138,7 +246,7 @@ export async function uploadFileChunks(
       throw new DOMException('Upload cancelled by user', 'AbortError');
     }
 
-    const nextEnd = Math.min(currentOffset + CHUNK_SIZE, totalBytes);
+    const nextEnd = Math.min(currentOffset + chunkSize, totalBytes);
     const chunk = file.slice(currentOffset, nextEnd);
     const contentRange = `bytes ${currentOffset}-${nextEnd - 1}/${totalBytes}`;
 
@@ -152,21 +260,21 @@ export async function uploadFileChunks(
 
       try {
         if (useDirectUpload) {
-          // Primary Path: Direct upload to Google Drive resumable session URI
-          const response = await fetch(resumableUri, {
-            method: 'PUT',
-            headers: {
-              'Content-Range': contentRange
+          // FAST PATH: Direct binary PUT to Google Drive with live socket progress events
+          const res = await putChunkDirectXHR(
+            resumableUri,
+            chunk,
+            contentRange,
+            (loadedInChunk) => {
+              emitProgress(currentOffset + loadedInChunk);
             },
-            body: chunk,
             signal
-          });
+          );
 
-          if (response.status === 308) {
+          if (res.status === 308) {
             // Chunk accepted, upload incomplete
-            const rangeHeader = response.headers.get('Range');
-            if (rangeHeader) {
-              const match = rangeHeader.match(/bytes=0-(\d+)/);
+            if (res.rangeHeader) {
+              const match = res.rangeHeader.match(/bytes=0-(\d+)/);
               if (match && match[1]) {
                 currentOffset = parseInt(match[1], 10) + 1;
               } else {
@@ -176,24 +284,29 @@ export async function uploadFileChunks(
               currentOffset = nextEnd;
             }
             chunkUploaded = true;
-          } else if (response.status === 200 || response.status === 201) {
+          } else if (res.status === 200 || res.status === 201) {
             // Upload complete!
             currentOffset = totalBytes;
             chunkUploaded = true;
 
-            const resultJson = await response.json().catch(() => ({}));
+            let resultJson: { id?: string } = {};
+            try {
+              resultJson = JSON.parse(res.responseText);
+            } catch {
+              resultJson = {};
+            }
+
             const driveFileId = resultJson.id || '';
             const driveFileUrl = driveFileId
               ? `https://drive.google.com/file/d/${driveFileId}/view`
               : '';
 
-            // Final progress update
             onProgress({
               fileId,
               uploadedBytes: totalBytes,
               totalBytes,
               progressPercent: 100,
-              bytesPerSecond: 0,
+              bytesPerSecond: rollingSpeed,
               estimatedSecondsRemaining: 0
             });
 
@@ -202,22 +315,20 @@ export async function uploadFileChunks(
               driveFileUrl,
               totalBytes
             };
-          } else if (response.status >= 500 && response.status < 600) {
+          } else if (res.status >= 500 && res.status < 600) {
             // Transient Google Drive server error: retry with exponential backoff
             attempt++;
             if (attempt > MAX_RETRIES) {
-              throw new Error(`Google Drive returned HTTP ${response.status} after ${MAX_RETRIES} retries`);
+              throw new Error(`Google Drive returned HTTP ${res.status} after ${MAX_RETRIES} retries`);
             }
             const delay = INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1);
-            await new Promise((res) => setTimeout(res, delay));
-            // Query current offset before retrying
+            await new Promise((r) => setTimeout(r, delay));
             currentOffset = await queryCurrentOffset(resumableUri, totalBytes, signal);
           } else {
-            const errorText = await response.text().catch(() => '');
-            throw new Error(`Upload failed with HTTP ${response.status}: ${errorText.slice(0, 200)}`);
+            throw new Error(`Google Drive returned HTTP ${res.status}: ${res.responseText.slice(0, 200)}`);
           }
         } else {
-          // Fallback Path: Relay chunk via Apps Script if browser-direct upload is blocked by CORS/firewall
+          // RELIABILITY FALLBACK: Relay chunk via Apps Script
           const chunkBase64 = await blobToBase64(chunk);
           const relayRes = await apiService.relayUploadChunk(
             resumableUri,
@@ -260,11 +371,10 @@ export async function uploadFileChunks(
           throw err;
         }
 
-        // Check if browser threw a network/CORS error on direct upload
+        // Detect if browser encountered CORS or direct fetch failure
         if (useDirectUpload && attempt === 0) {
           console.warn('[Neo Upload] Direct PUT encountered network/CORS restriction. Switching smoothly to server relay fallback...');
           useDirectUpload = false;
-          // Don't count switching mode as a failed attempt
           continue;
         }
 
@@ -274,34 +384,11 @@ export async function uploadFileChunks(
         }
 
         const delay = INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1);
-        await new Promise((res) => setTimeout(res, delay));
+        await new Promise((r) => setTimeout(r, delay));
       }
     }
 
-    // Update real speed and progress calculations
-    const now = performance.now();
-    const timeDeltaSec = (now - lastTime) / 1000;
-    if (timeDeltaSec >= 0.5) {
-      const bytesDelta = currentOffset - lastUploadedBytes;
-      const currentSpeed = bytesDelta / timeDeltaSec;
-      rollingSpeed = rollingSpeed === 0 ? currentSpeed : rollingSpeed * 0.7 + currentSpeed * 0.3;
-      lastTime = now;
-      lastUploadedBytes = currentOffset;
-    }
-
-    const remainingBytes = Math.max(0, totalBytes - currentOffset);
-    const estimatedSecondsRemaining =
-      rollingSpeed > 0 ? Math.ceil(remainingBytes / rollingSpeed) : null;
-    const progressPercent = Math.min(100, Math.round((currentOffset / totalBytes) * 1000) / 10);
-
-    onProgress({
-      fileId,
-      uploadedBytes: currentOffset,
-      totalBytes,
-      progressPercent,
-      bytesPerSecond: rollingSpeed,
-      estimatedSecondsRemaining
-    });
+    emitProgress(currentOffset);
   }
 
   return {
