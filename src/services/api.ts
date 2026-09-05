@@ -17,8 +17,11 @@ import {
 
 const STORAGE_KEY_API_URL = 'neo_apps_script_url';
 
+export const DEFAULT_APPS_SCRIPT_URL =
+  'https://script.google.com/macros/s/AKfycbyhZwj_O_jTJNa0_1ttWpZ6NmvqZJ5B0cYhnO_XOXOEcDXBO7vi1E8kI0msLT6gnWIc/exec';
+
 /**
- * Gets the configured Apps Script Web App URL from localStorage or environment
+ * Gets the configured Apps Script Web App URL from localStorage, environment, or default deployment
  */
 export function getAppsScriptUrl(): string {
   const stored = localStorage.getItem(STORAGE_KEY_API_URL);
@@ -29,7 +32,7 @@ export function getAppsScriptUrl(): string {
   if (envUrl && typeof envUrl === 'string' && envUrl.trim().startsWith('http')) {
     return envUrl.trim();
   }
-  return '';
+  return DEFAULT_APPS_SCRIPT_URL;
 }
 
 /**
