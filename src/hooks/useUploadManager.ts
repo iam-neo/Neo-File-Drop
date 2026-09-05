@@ -56,6 +56,7 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
   sessionRef.current = session;
 
   const activeUploadsCountRef = useRef(0);
+  const inFlightFileIdsRef = useRef<Set<string>>(new Set());
   const isCancelledOrPausedRef = useRef(false);
 
   // Speed calculation references
@@ -99,7 +100,7 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
    */
   const processFileUpload = useCallback(
     async (item: FileQueueItem, driveFolderId: string) => {
-      activeUploadsCountRef.current++;
+      activeUploadsCountRef.current = inFlightFileIdsRef.current.size;
       const abortController = new AbortController();
 
       updateFile(item.id, {
@@ -192,7 +193,8 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
           });
         }
       } finally {
-        activeUploadsCountRef.current--;
+        inFlightFileIdsRef.current.delete(item.id);
+        activeUploadsCountRef.current = inFlightFileIdsRef.current.size;
         // Trigger queue scheduler to pick the next queued item
         scheduleNext();
       }
@@ -204,50 +206,62 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
   /**
    * Concurrency scheduler: checks how many slots are open and starts pending uploads
    */
-  const scheduleNext = useCallback(() => {
-    if (isCancelledOrPausedRef.current) return;
+  const scheduleNext = useCallback(
+    (explicitFolderId?: string) => {
+      if (isCancelledOrPausedRef.current) return;
 
-    const currentFiles = filesRef.current;
-    const activeFolderId = sessionRef.current.driveFolderId;
+      const currentFiles = filesRef.current;
+      const activeFolderId = explicitFolderId || sessionRef.current.driveFolderId;
 
-    if (!activeFolderId) return;
+      if (!activeFolderId) return;
 
-    // Check overall completion
-    const allFinished = currentFiles.every(
-      (f) => f.status === 'completed' || f.status === 'error' || f.status === 'cancelled'
-    );
-    const hasActiveOrQueued = currentFiles.some(
-      (f) => f.status === 'uploading' || f.status === 'creating_session' || f.status === 'queued'
-    );
+      // Check overall completion
+      const allFinished = currentFiles.every(
+        (f) => f.status === 'completed' || f.status === 'error' || f.status === 'cancelled'
+      );
+      const hasActiveOrQueued = currentFiles.some(
+        (f) => f.status === 'uploading' || f.status === 'creating_session' || f.status === 'queued'
+      );
 
-    if (allFinished && !hasActiveOrQueued && currentFiles.length > 0) {
-      const anySuccess = currentFiles.some((f) => f.status === 'completed');
-      const allSuccess = currentFiles.every((f) => f.status === 'completed');
+      if (
+        inFlightFileIdsRef.current.size === 0 &&
+        allFinished &&
+        !hasActiveOrQueued &&
+        currentFiles.length > 0
+      ) {
+        const anySuccess = currentFiles.some((f) => f.status === 'completed');
+        const allSuccess = currentFiles.every((f) => f.status === 'completed');
 
-      setSession((prev) => ({
-        ...prev,
-        status: allSuccess ? 'completed' : anySuccess ? 'completed' : 'error',
-        completedAt: Date.now(),
-        overallSpeed: 0,
-        remainingSeconds: 0
-      }));
+        setSession((prev) => ({
+          ...prev,
+          status: allSuccess ? 'completed' : anySuccess ? 'completed' : 'error',
+          completedAt: Date.now(),
+          overallSpeed: 0,
+          remainingSeconds: 0
+        }));
 
-      if (anySuccess) {
-        triggerCelebration();
+        if (anySuccess) {
+          triggerCelebration();
+        }
+        return;
       }
-      return;
-    }
 
-    // Fill available concurrency slots
-    while (activeUploadsCountRef.current < CONCURRENT_UPLOADS) {
-      const nextItem = filesRef.current.find((f) => f.status === 'queued');
-      if (!nextItem) break;
+      // Fill available concurrency slots (prevent duplicate reservation with inFlightFileIdsRef)
+      while (inFlightFileIdsRef.current.size < CONCURRENT_UPLOADS) {
+        const nextItem = filesRef.current.find(
+          (f) => f.status === 'queued' && !inFlightFileIdsRef.current.has(f.id)
+        );
+        if (!nextItem) break;
 
-      // Mark as reserved immediately to avoid race condition
-      updateFile(nextItem.id, { status: 'uploading' });
-      processFileUpload(nextItem, activeFolderId);
-    }
-  }, [processFileUpload, triggerCelebration, updateFile]);
+        // Mark as reserved immediately to avoid any duplicate picking across loops
+        inFlightFileIdsRef.current.add(nextItem.id);
+        activeUploadsCountRef.current = inFlightFileIdsRef.current.size;
+        updateFile(nextItem.id, { status: 'uploading' });
+        processFileUpload(nextItem, activeFolderId);
+      }
+    },
+    [processFileUpload, triggerCelebration, updateFile]
+  );
 
   /**
    * Starts the upload process
@@ -293,6 +307,12 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
         folderId = createRes.folderId;
         folderUrl = createRes.folderUrl || `https://drive.google.com/drive/folders/${folderId}`;
 
+        sessionRef.current = {
+          ...sessionRef.current,
+          driveFolderId: folderId,
+          driveFolderUrl: folderUrl
+        };
+
         setSession((prev) => ({
           ...prev,
           driveFolderId: folderId,
@@ -300,13 +320,18 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
         }));
       }
 
+      sessionRef.current = {
+        ...sessionRef.current,
+        status: 'uploading'
+      };
+
       setSession((prev) => ({
         ...prev,
         status: 'uploading'
       }));
 
-      // Step 2: Kick off concurrency scheduler
-      scheduleNext();
+      // Step 2: Kick off concurrency scheduler immediately with the folderId
+      scheduleNext(folderId);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to initialize upload session';
       setSession((prev) => ({
@@ -322,6 +347,8 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
    */
   const pauseAll = useCallback(() => {
     isCancelledOrPausedRef.current = true;
+    inFlightFileIdsRef.current.clear();
+    activeUploadsCountRef.current = 0;
     filesRef.current.forEach((f) => {
       if (f.status === 'uploading' || f.status === 'creating_session') {
         if (f.abortController) {
@@ -330,6 +357,13 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
         updateFile(f.id, { status: 'paused', speed: 0, remainingTime: null });
       }
     });
+
+    sessionRef.current = {
+      ...sessionRef.current,
+      status: 'paused',
+      overallSpeed: 0,
+      remainingSeconds: null
+    };
 
     setSession((prev) => ({
       ...prev,
@@ -344,6 +378,8 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
    */
   const resumeAll = useCallback(() => {
     isCancelledOrPausedRef.current = false;
+    inFlightFileIdsRef.current.clear();
+    activeUploadsCountRef.current = 0;
 
     // Reset paused files to queued so scheduler picks them up
     filesRef.current.forEach((f) => {
@@ -351,6 +387,11 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
         updateFile(f.id, { status: 'queued' });
       }
     });
+
+    sessionRef.current = {
+      ...sessionRef.current,
+      status: 'uploading'
+    };
 
     setSession((prev) => ({
       ...prev,
@@ -367,6 +408,8 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
    */
   const retryFile = useCallback(
     (fileId: string) => {
+      inFlightFileIdsRef.current.delete(fileId);
+      activeUploadsCountRef.current = inFlightFileIdsRef.current.size;
       const target = filesRef.current.find((f) => f.id === fileId);
       if (!target || !sessionRef.current.driveFolderId) return;
 
@@ -376,6 +419,7 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
       });
 
       if (sessionRef.current.status !== 'uploading') {
+        sessionRef.current = { ...sessionRef.current, status: 'uploading' };
         setSession((prev) => ({ ...prev, status: 'uploading' }));
       }
 
@@ -392,6 +436,8 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
    */
   const cancelFile = useCallback(
     (fileId: string) => {
+      inFlightFileIdsRef.current.delete(fileId);
+      activeUploadsCountRef.current = inFlightFileIdsRef.current.size;
       const target = filesRef.current.find((f) => f.id === fileId);
       if (target?.abortController) {
         target.abortController.abort();
@@ -410,6 +456,9 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
    * Resets entire session for a fresh upload
    */
   const resetSession = useCallback(() => {
+    isCancelledOrPausedRef.current = true;
+    inFlightFileIdsRef.current.clear();
+    activeUploadsCountRef.current = 0;
     filesRef.current.forEach((f) => {
       if (f.abortController) {
         f.abortController.abort();
@@ -417,7 +466,7 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
     });
 
     setFolderName('');
-    setSession({
+    const newSession: UploadSessionState = {
       submissionId: generateSubmissionId(),
       folderName: '',
       driveFolderId: null,
@@ -430,7 +479,9 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
       remainingSeconds: null,
       startedAt: null,
       completedAt: null
-    });
+    };
+    sessionRef.current = newSession;
+    setSession(newSession);
   }, []);
 
   // Update session progress and speed periodically
