@@ -172,6 +172,23 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
           speed: 0,
           remainingTime: 0
         });
+
+        // Synchronously update filesRef so completion check in scheduleNext sees it immediately
+        filesRef.current = filesRef.current.map((f) =>
+          f.id === item.id
+            ? {
+                ...f,
+                status: 'completed',
+                progress: 100,
+                uploadedBytes: item.size,
+                driveFileId: result.driveFileId,
+                driveFileUrl: result.driveFileUrl,
+                abortController: null,
+                speed: 0,
+                remainingTime: 0
+              }
+            : f
+        );
       } catch (err: unknown) {
         if (err instanceof DOMException && err.name === 'AbortError') {
           // Paused or cancelled by user/offline
@@ -181,6 +198,11 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
             speed: 0,
             remainingTime: null
           });
+          filesRef.current = filesRef.current.map((f) =>
+            f.id === item.id
+              ? { ...f, status: 'paused', abortController: null, speed: 0, remainingTime: null }
+              : f
+          );
         } else {
           const errorMsg = err instanceof Error ? err.message : 'Upload failed';
           updateFile(item.id, {
@@ -191,11 +213,24 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
             speed: 0,
             remainingTime: null
           });
+          filesRef.current = filesRef.current.map((f) =>
+            f.id === item.id
+              ? {
+                  ...f,
+                  status: 'error',
+                  errorMessage: errorMsg,
+                  retryCount: item.retryCount + 1,
+                  abortController: null,
+                  speed: 0,
+                  remainingTime: null
+                }
+              : f
+          );
         }
       } finally {
         inFlightFileIdsRef.current.delete(item.id);
         activeUploadsCountRef.current = inFlightFileIdsRef.current.size;
-        // Trigger queue scheduler to pick the next queued item
+        // Trigger queue scheduler to pick the next queued item or complete session
         scheduleNext();
       }
     },
@@ -231,6 +266,14 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
       ) {
         const anySuccess = currentFiles.some((f) => f.status === 'completed');
         const allSuccess = currentFiles.every((f) => f.status === 'completed');
+
+        sessionRef.current = {
+          ...sessionRef.current,
+          status: allSuccess ? 'completed' : anySuccess ? 'completed' : 'error',
+          completedAt: Date.now(),
+          overallSpeed: 0,
+          remainingSeconds: 0
+        };
 
         setSession((prev) => ({
           ...prev,
@@ -541,6 +584,44 @@ export function useUploadManager({ files, updateFile, stats }: UseUploadManagerP
       window.removeEventListener('offline', handleOffline);
     };
   }, [pauseAll, resumeAll]);
+
+  // Watch files for automatic session completion if all files reach a terminal status
+  useEffect(() => {
+    if (session.status !== 'uploading') return;
+    if (inFlightFileIdsRef.current.size > 0 || files.length === 0) return;
+
+    const allFinished = files.every(
+      (f) => f.status === 'completed' || f.status === 'error' || f.status === 'cancelled'
+    );
+    const hasActiveOrQueued = files.some(
+      (f) => f.status === 'uploading' || f.status === 'creating_session' || f.status === 'queued'
+    );
+
+    if (allFinished && !hasActiveOrQueued) {
+      const anySuccess = files.some((f) => f.status === 'completed');
+      const allSuccess = files.every((f) => f.status === 'completed');
+
+      sessionRef.current = {
+        ...sessionRef.current,
+        status: allSuccess ? 'completed' : anySuccess ? 'completed' : 'error',
+        completedAt: Date.now(),
+        overallSpeed: 0,
+        remainingSeconds: 0
+      };
+
+      setSession((prev) => ({
+        ...prev,
+        status: allSuccess ? 'completed' : anySuccess ? 'completed' : 'error',
+        completedAt: Date.now(),
+        overallSpeed: 0,
+        remainingSeconds: 0
+      }));
+
+      if (anySuccess) {
+        triggerCelebration();
+      }
+    }
+  }, [files, session.status, triggerCelebration]);
 
   return {
     folderName,
